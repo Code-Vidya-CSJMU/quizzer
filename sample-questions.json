@@ -1,0 +1,28 @@
+[
+  {
+    "id": "q1",
+    "text": "2 + 2 = ?",
+    "choices": [
+      {"id": "a", "text": "3"},
+      {"id": "b", "text": "4"},
+      {"id": "c", "text": "5"},
+      {"id": "d", "text": "22"}
+    ],
+    "answer": "b",
+    "duration": 20,
+    "hint": "Even number"
+  },
+  {
+    "id": "q2",
+    "text": "Capital of France?",
+    "choices": [
+      {"id": "a", "text": "Berlin"},
+      {"id": "b", "text": "Madrid"},
+      {"id": "c", "text": "Paris"},
+      {"id": "d", "text": "Rome"}
+    ],
+    "answer": "c",
+    "duration": 25,
+    "hint": "City of Light"
+  }
+]
