@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
+import { SOCKET_URL, SOCKET_PATH } from '../config'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { BrandLayout, GlassCard, BrandButton, BrandStrip } from '../components/Brand'
 
@@ -33,7 +34,7 @@ export default function Quiz() {
       nav('/')
       return
     }
-  const s = io('/', { path: '/ws/socket.io', transports: ['websocket'] })
+  const s = io(SOCKET_URL, { path: SOCKET_PATH, transports: ['websocket'] })
     s.on('connect', () => {
       s.emit('join_quiz', { name, playerId, email })
     })

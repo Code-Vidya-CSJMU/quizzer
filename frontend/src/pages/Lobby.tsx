@@ -1,3 +1,4 @@
+import { api } from '../config'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { BrandLayout, GlassCard, BrandButton, BrandStrip } from '../components/Brand'
@@ -15,11 +16,11 @@ export default function Lobby() {
     setError(null)
     setLoading(true)
     try {
-      const vResp = await fetch(`/api/quiz/validate`)
+    const vResp = await fetch(api(`/api/quiz/validate`))
       if (!vResp.ok) throw new Error('Quiz not available')
       const v = await vResp.json()
       if (!v.valid) throw new Error('Quiz not available')
-      const regResp = await fetch(`/api/quiz/register`, {
+    const regResp = await fetch(api(`/api/quiz/register`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email }),

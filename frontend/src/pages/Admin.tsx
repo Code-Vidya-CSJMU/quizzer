@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
+import { api, SOCKET_URL, SOCKET_PATH } from '../config'
 
 type LifelinesState = { '5050': boolean; hint: boolean }
 
@@ -30,7 +31,7 @@ export default function Admin() {
   function connectSocket() {
     if (socket) socket.disconnect()
     // Connect to default namespace with custom path (proxy handles /ws/* to backend)
-  const s = io('/', { path: '/ws/socket.io', transports: ['websocket'] })
+  const s = io(SOCKET_URL, { path: SOCKET_PATH, transports: ['websocket'] })
     s.on('connect', () => {
       setConnected(true)
       s.emit('admin_join', { token }) // global quiz (code omitted)
@@ -51,7 +52,7 @@ export default function Admin() {
 
   async function ensureSession() {
     // Create/ensure global session exists (idempotent)
-    await fetch('/api/admin/quiz', { method: 'POST', headers: { 'X-Admin-Token': token } })
+  await fetch(api('/api/admin/quiz'), { method: 'POST', headers: { 'X-Admin-Token': token } })
   }
 
   async function uploadQuestions() {
@@ -59,7 +60,7 @@ export default function Admin() {
     try {
       await ensureSession()
       const questions = JSON.parse(questionJson)
-      const r = await fetch(`/api/admin/questions`, {
+  const r = await fetch(api(`/api/admin/questions`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
         body: JSON.stringify({ questions }),
@@ -73,7 +74,7 @@ export default function Admin() {
   }
 
   async function listQsets() {
-    const r = await fetch('/api/admin/question_sets', { headers: { 'X-Admin-Token': token } })
+  const r = await fetch(api('/api/admin/question_sets'), { headers: { 'X-Admin-Token': token } })
     if (r.ok) {
       const data = await r.json()
       setQsets(data.items || [])
@@ -82,12 +83,12 @@ export default function Admin() {
 
   async function saveQset(name: string) {
     const payload = builderList.length ? builderList : (questionJson.trim() ? JSON.parse(questionJson) : [])
-    const r = await fetch('/api/admin/question_sets/save', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ name, questions: payload }) })
+  const r = await fetch(api('/api/admin/question_sets/save'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ name, questions: payload }) })
     if (r.ok) { appendLog('Saved question set: ' + name); listQsets() }
   }
 
   async function loadQset(name: string) {
-    const r = await fetch('/api/admin/question_sets/load', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ name }) })
+  const r = await fetch(api('/api/admin/question_sets/load'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ name }) })
     if (r.ok) {
       const data = await r.json()
       setQuestionJson(JSON.stringify(data.questions, null, 2))
@@ -98,12 +99,12 @@ export default function Admin() {
 
   async function applyQset(name: string) {
     await ensureSession()
-    const r = await fetch('/api/admin/question_sets/apply', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ name }) })
+  const r = await fetch(api('/api/admin/question_sets/apply'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ name }) })
     if (r.ok) { const d = await r.json(); appendLog(`Applied set '${name}' (${d.count} questions)`) }
   }
 
   async function exportCurrent() {
-    const r = await fetch('/api/admin/questions/export', { method: 'POST', headers: { 'X-Admin-Token': token } })
+  const r = await fetch(api('/api/admin/questions/export'), { method: 'POST', headers: { 'X-Admin-Token': token } })
     if (r.ok) {
       const data = await r.json()
       setQuestionJson(JSON.stringify(data.questions, null, 2))
@@ -126,24 +127,24 @@ export default function Admin() {
 
   async function startQuiz() {
     await ensureSession()
-    await fetch(`/api/admin/start`, { method: 'POST', headers: { 'X-Admin-Token': token } })
+  await fetch(api(`/api/admin/start`), { method: 'POST', headers: { 'X-Admin-Token': token } })
     appendLog('Quiz started')
   }
   async function next() {
-    const r = await fetch(`/api/admin/next`, { method: 'POST', headers: { 'X-Admin-Token': token } })
+  const r = await fetch(api(`/api/admin/next`), { method: 'POST', headers: { 'X-Admin-Token': token } })
     if (r.ok) {
       const data = await r.json().catch(() => ({}))
       if (data?.revealed) appendLog('Reveal executed (first press)')
       else appendLog('Advanced to next question')
     }
   }
-  async function pause() { await fetch(`/api/admin/pause`, { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Quiz paused/resumed') }
-  async function reset() { await fetch(`/api/admin/reset`, { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Quiz reset') }
-  async function reveal() { await fetch(`/api/admin/reveal`, { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Reveal triggered') }
-  async function updateLifelines() { await fetch(`/api/admin/lifelines`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ lifelines }) }); appendLog('Lifelines updated') }
+  async function pause() { await fetch(api(`/api/admin/pause`), { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Quiz paused/resumed') }
+  async function reset() { await fetch(api(`/api/admin/reset`), { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Quiz reset') }
+  async function reveal() { await fetch(api(`/api/admin/reveal`), { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Reveal triggered') }
+  async function updateLifelines() { await fetch(api(`/api/admin/lifelines`), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ lifelines }) }); appendLog('Lifelines updated') }
 
   async function loadAllowed() {
-    const r = await fetch('/api/admin/allowed_emails', { headers: { 'X-Admin-Token': token } })
+  const r = await fetch(api('/api/admin/allowed_emails'), { headers: { 'X-Admin-Token': token } })
     if (r.ok) {
       const data = await r.json()
       setAllowedEmailsText(data.emails.join('\n'))
@@ -152,7 +153,7 @@ export default function Admin() {
   }
   async function saveAllowed(mode: string = 'replace') {
     const emails = allowedEmailsText.split(/\n|,/).map(e => e.trim()).filter(Boolean)
-    const r = await fetch('/api/admin/allowed_emails', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ emails, mode }) })
+  const r = await fetch(api('/api/admin/allowed_emails'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ emails, mode }) })
     if (r.ok) {
       const data = await r.json()
       appendLog(`Saved allowed emails (${data.count})`)
@@ -309,8 +310,8 @@ export default function Admin() {
           <button onClick={next} disabled={!token}>Next</button>
           <button onClick={pause} disabled={!token}>Pause/Resume</button>
           <button onClick={reveal} disabled={!token}>Reveal</button>
-          <button onClick={async () => { await fetch('/api/admin/leaderboard/show', { method: 'POST', headers: { 'X-Admin-Token': token } }) }} disabled={!token}>Show Leaderboard</button>
-          <button onClick={async () => { await fetch('/api/admin/leaderboard/hide', { method: 'POST', headers: { 'X-Admin-Token': token } }) }} disabled={!token}>Hide Leaderboard</button>
+          <button onClick={async () => { await fetch(api('/api/admin/leaderboard/show'), { method: 'POST', headers: { 'X-Admin-Token': token } }) }} disabled={!token}>Show Leaderboard</button>
+          <button onClick={async () => { await fetch(api('/api/admin/leaderboard/hide'), { method: 'POST', headers: { 'X-Admin-Token': token } }) }} disabled={!token}>Hide Leaderboard</button>
           <button onClick={reset} disabled={!token}>Reset</button>
         </div>
         {status && (
