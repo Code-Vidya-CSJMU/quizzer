@@ -41,7 +41,13 @@ export default function Lobby() {
 
   return (
     <BrandLayout subtitle={<span className="hidden sm:inline">Live Quiz</span>}>
-      <div className="max-w-md mx-auto">
+      <div className="max-w-3xl mx-auto">
+        <div className="mb-6 sm:mb-8 flex items-center justify-center gap-4 sm:gap-6 opacity-95">
+          <img src="/brands/coding_club.jpg" alt="Code Vidya" className="h-10 sm:h-14 rounded" />
+          <span className="text-slate-300">×</span>
+          <img src="/brands/robotics_club.jpg" alt="Robo Gyan" className="h-10 sm:h-14 rounded" />
+        </div>
+        <div className="max-w-md mx-auto">
         <GlassCard>
           <div className="text-center mb-6">
             <h1 className="text-3xl font-extrabold tracking-tight">Join the Quiz</h1>
@@ -62,8 +68,9 @@ export default function Lobby() {
           </form>
           {error && <p className="text-rose-400 text-sm mt-4">{error}</p>}
           <p className="text-center text-xs text-slate-400 mt-6">By joining you agree to follow the host’s instructions.</p>
-          <BrandStrip />
+            <BrandStrip />
         </GlassCard>
+        </div>
       </div>
     </BrandLayout>
   )

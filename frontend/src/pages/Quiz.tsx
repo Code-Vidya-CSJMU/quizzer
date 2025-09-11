@@ -21,6 +21,7 @@ export default function Quiz() {
   const [lifelineMsg, setLifelineMsg] = useState<string | null>(null)
   const [locked, setLocked] = useState<boolean>(false)
   const [lockedAnswer, setLockedAnswer] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState<boolean>(false)
   const [revealAnswer, setRevealAnswer] = useState<string | null>(null)
   const [rejectedReason, setRejectedReason] = useState<string | null>(null)
   const [paused, setPaused] = useState<boolean>(false)
@@ -80,10 +81,13 @@ export default function Quiz() {
           setTimeLeft(Math.ceil(st.remaining))
         }
       })
-  s.on('answer_result', (r) => setResult(r))
-    s.on('answer_locked', () => setLocked(true))
+    s.on('answer_result', (r) => setResult(r))
+    s.on('answer_locked', (payload) => { setLocked(true); setSubmitting(false); if (payload?.answer) setLockedAnswer(String(payload.answer)) })
     s.on('answer_rejected', (r) => {
         setRejectedReason(r?.reason || 'rejected')
+        setSubmitting(false)
+        // If we optimistically set a choice, clear it when rejected
+        if (!locked) setLockedAnswer(null)
       })
     s.on('paused', () => { setPaused(true); setStatus((prev: any) => ({ ...(prev || {}), paused: true })) })
     s.on('resumed', () => { setPaused(false); setStatus((prev: any) => ({ ...(prev || {}), paused: false })) })
@@ -99,6 +103,10 @@ export default function Quiz() {
   s.on('leaderboard', (lb) => setLeaderboard(lb))
   s.on('leaderboard_show', (lb) => { setLeaderboard(lb || []); setShowLB(true) })
   s.on('leaderboard_hide', () => setShowLB(false))
+    s.on('reset', () => {
+      try { s.disconnect() } catch {}
+      nav('/')
+    })
     s.on('replaced', () => {
       alert('You were disconnected because another tab connected with your email.')
       s.disconnect()
@@ -121,7 +129,9 @@ export default function Quiz() {
   }, [timeLeft, paused, revealed])
 
   function submitAnswer(answer: string) {
-    if (locked || revealed || paused) return
+    const disallowed = locked || revealed || paused || submitting || (timeLeft <= 0)
+    if (disallowed) return
+    setSubmitting(true)
     setLockedAnswer(answer)
     socket?.emit('submit_answer', { answer })
   }
@@ -165,7 +175,7 @@ export default function Quiz() {
               {question.choices ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {(keepIds ? question.choices.filter((c: any) => keepIds.includes(c.id)) : question.choices).map((c: any) => {
-                    const disabled = locked || revealed || paused
+                    const disabled = locked || revealed || paused || submitting || (timeLeft <= 0)
                     const isLocked = lockedAnswer === c.id
                     const isCorrect = revealed && revealAnswer && c.id === revealAnswer
                     const isWrongLocked = revealed && isLocked && revealAnswer && c.id !== revealAnswer
@@ -189,19 +199,22 @@ export default function Quiz() {
                 <form
                   onSubmit={(e) => {
                     e.preventDefault()
-                    if (locked || revealed || paused) return
+                    if (locked || revealed || paused || submitting || (timeLeft <= 0)) return
                     const val = (e.target as any).ans.value
+                    setSubmitting(true)
+                    setLockedAnswer(val)
                     submitAnswer(val)
                   }}
                   className="flex gap-2"
                 >
-                  <input className="flex-1" name="ans" placeholder="Type your answer" disabled={locked || revealed || paused} />
-                  <BrandButton className="min-w-[120px]" type="submit" disabled={locked || revealed || paused}>Submit</BrandButton>
+                  <input className="flex-1" name="ans" placeholder="Type your answer" disabled={locked || revealed || paused || submitting || (timeLeft <= 0)} />
+                  <BrandButton className="min-w-[120px]" type="submit" disabled={locked || revealed || paused || submitting || (timeLeft <= 0)}>{submitting ? 'Locking…' : 'Submit'}</BrandButton>
                 </form>
               )}
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-4 text-sm text-slate-300">
                 <span>Time left: {timeLeft}s</span>
+                {submitting && !locked && !revealed && <span>Locking…</span>}
                 {locked && !revealed && <span>Answer locked</span>}
                 {locked && lockedAnswer && revealed && result && (
                   <span className={result.correct ? 'text-emerald-300' : 'text-rose-300'}>You answered: {lockedAnswer}</span>
@@ -228,8 +241,8 @@ export default function Quiz() {
         <div className="mt-6">
           <div className="text-sm font-semibold mb-2 text-slate-300">Lifelines</div>
           <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
-            <BrandButton className="w-full" variant="muted" onClick={() => useLifeline('5050')} disabled={!lifelineStatus['5050']}>50-50</BrandButton>
-            <BrandButton className="w-full" variant="muted" onClick={() => useLifeline('hint')} disabled={!lifelineStatus['hint']}>Hint</BrandButton>
+            <BrandButton className="w-full" variant="muted" onClick={() => useLifeline('5050')} disabled={!lifelineStatus['5050'] || paused || revealed || locked || submitting || (timeLeft <= 0)}>50-50</BrandButton>
+            <BrandButton className="w-full" variant="muted" onClick={() => useLifeline('hint')} disabled={!lifelineStatus['hint'] || paused || revealed || locked || submitting || (timeLeft <= 0)}>Hint</BrandButton>
           </div>
           {lifelineMsg && <div className="mt-2 text-xs text-slate-400">{lifelineMsg}</div>}
         </div>

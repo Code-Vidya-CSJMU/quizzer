@@ -10,6 +10,7 @@ def get_data_dir() -> str:
         base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
     os.makedirs(os.path.join(base, "sessions"), exist_ok=True)
     os.makedirs(os.path.join(base, "question_sets"), exist_ok=True)
+    os.makedirs(os.path.join(base, "leaderboards"), exist_ok=True)
     return base
 
 
@@ -116,3 +117,68 @@ def delete_question_set(name: str) -> bool:
         os.remove(path)
         return True
     return False
+
+
+# --- Leaderboard snapshots ---
+def _leaderboard_dir() -> str:
+    return os.path.join(get_data_dir(), "leaderboards")
+
+
+def save_leaderboard_snapshot(code: str, leaderboard: List[Dict]) -> str:
+    import datetime as _dt
+    code = str(code).upper()
+    ts = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    fname = f"{code}_{ts}.json"
+    path = os.path.join(_leaderboard_dir(), fname)
+    tmp = path + ".tmp"
+    payload = {"code": code, "createdAt": ts, "leaderboard": leaderboard}
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+    return fname
+
+
+def list_leaderboard_snapshots(code: Optional[str] = None) -> List[Dict]:
+    items: List[Dict] = []
+    ldir = _leaderboard_dir()
+    if not os.path.isdir(ldir):
+        return items
+    for name in os.listdir(ldir):
+        if not name.endswith('.json'):
+            continue
+        if code and not name.upper().startswith(str(code).upper() + '_'):
+            continue
+        try:
+            with open(os.path.join(ldir, name), 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            created_at = data.get("createdAt")
+            created_human = None
+            if isinstance(created_at, str):
+                try:
+                    import datetime as _dt
+                    dt = _dt.datetime.strptime(created_at, "%Y%m%d_%H%M%S")
+                    created_human = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                except Exception:
+                    created_human = created_at
+            items.append({
+                "name": name[:-5],
+                "file": name,
+                "createdAt": created_at,
+                "createdAtHuman": created_human,
+                "count": len(data.get("leaderboard") or []),
+                "code": data.get("code"),
+            })
+        except Exception:
+            continue
+    # newest first
+    items.sort(key=lambda d: d.get("file"), reverse=True)
+    return items
+
+
+def load_leaderboard_snapshot(file_name: str) -> Optional[Dict]:
+    ldir = _leaderboard_dir()
+    path = os.path.join(ldir, file_name if file_name.endswith('.json') else file_name + '.json')
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)

@@ -125,6 +125,9 @@ class RegisterResponse(BaseModel):
 class StartPayload(BaseModel):
     index: Optional[int] = None
 
+class GotoPayload(BaseModel):
+    index: int
+
 
 class LifelinesPayload(BaseModel):
     lifelines: Dict[str, bool]
@@ -133,6 +136,9 @@ class LifelinesPayload(BaseModel):
 class AllowedEmailsPayload(BaseModel):
     emails: List[str]
     mode: Optional[str] = "replace"  # replace | append | remove
+
+class SnapshotFilePayload(BaseModel):
+    file: str
 
 
 @app.post("/api/admin/quiz", response_model=CreateQuizResponse)
@@ -210,6 +216,10 @@ async def next_quiz_global(_: None = Depends(require_admin)):
 async def reveal_global(_: None = Depends(require_admin)):
     return await reveal_only(GLOBAL_CODE, _)
 
+@app.post("/api/admin/goto")
+async def goto_quiz_global(payload: GotoPayload, _: None = Depends(require_admin)):
+    return await goto_question(GLOBAL_CODE, payload, _)
+
 @app.post("/api/admin/pause")
 async def pause_quiz_global(_: None = Depends(require_admin)):
     return await pause_quiz(GLOBAL_CODE, _)
@@ -232,13 +242,98 @@ async def leaderboard_show_global(_: None = Depends(require_admin)):
     if not session:
         raise HTTPException(404, "Quiz not found")
     lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
-    payload = [{"id": pl.id, "name": pl.name, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
+    payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
     await sio.emit("leaderboard_show", payload, room=QUIZ_ROOM)
     return {"ok": True}
 
 @app.post("/api/admin/leaderboard/hide")
 async def leaderboard_hide_global(_: None = Depends(require_admin)):
     await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
+    return {"ok": True}
+
+@app.get("/api/admin/leaderboard/snapshots")
+async def leaderboard_snapshots_list(_: None = Depends(require_admin)):
+    items = storage.list_leaderboard_snapshots(GLOBAL_CODE)
+    return {"items": items}
+
+@app.post("/api/admin/leaderboard/snapshots/load")
+async def leaderboard_snapshot_load(payload: SnapshotFilePayload, _: None = Depends(require_admin)):
+    data = storage.load_leaderboard_snapshot(payload.file)
+    if not data:
+        raise HTTPException(404, "Snapshot not found")
+    return data
+
+@app.post("/api/admin/leaderboard/snapshots/apply")
+async def leaderboard_snapshot_apply(payload: SnapshotFilePayload, _: None = Depends(require_admin)):
+    session = SESSIONS.get(GLOBAL_CODE)
+    if not session:
+        raise HTTPException(404, "Quiz not found")
+    data = storage.load_leaderboard_snapshot(payload.file)
+    if not data:
+        raise HTTPException(404, "Snapshot not found")
+    lb = data.get("leaderboard") or []
+    # apply scores by matching participantCode or email
+    code_to_score: Dict[str, int] = {}
+    for item in lb:
+        code_to_score[str((item.get("participantCode") or '')).lower()] = int(item.get("score") or 0)
+    for p in session.players.values():
+        key = (p.participant_code or '').lower()
+        p.score = code_to_score.get(key, 0)
+    storage.save_session_dict(GLOBAL_CODE, session.model_dump())
+    # emit refreshed leaderboard
+    new_lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
+    payload_out = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code} for pl in new_lb]
+    await sio.emit("leaderboard", payload_out, room=ADMIN_ROOM)
+    await sio.emit("leaderboard", payload_out, room=QUIZ_ROOM)
+    return {"ok": True, "applied": len(new_lb)}
+
+@app.post("/api/admin/leaderboard/reset")
+async def leaderboard_reset_global(_: None = Depends(require_admin)):
+    session = SESSIONS.get(GLOBAL_CODE)
+    if not session:
+        raise HTTPException(404, "Quiz not found")
+    # Zero scores for all players
+    for p in session.players.values():
+        p.score = 0
+    storage.save_session_dict(GLOBAL_CODE, session.model_dump())
+    # Broadcast updated leaderboard snapshot
+    lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
+    payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
+    await sio.emit("leaderboard", payload, room=ADMIN_ROOM)
+    await sio.emit("leaderboard", payload, room=QUIZ_ROOM)
+    # Ensure any overlay is hidden unless host shows again
+    await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
+    return {"ok": True}
+
+@app.post("/api/admin/full_reset")
+async def full_reset_global(_: None = Depends(require_admin)):
+    """Clear all sessions, players, and state (like fresh start). Keep saved question sets on disk."""
+    # Disconnect all active player sockets
+    try:
+        for sid in list(ACTIVE_PLAYER_SOCKETS.values()):
+            try:
+                await sio.disconnect(sid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    ACTIVE_PLAYER_SOCKETS.clear()
+    SID_TO_PLAYER.clear()
+    # Delete persisted sessions and reset in-memory
+    try:
+        for code in list(SESSIONS.keys()):
+            try:
+                storage.delete_session(code)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    SESSIONS.clear()
+    SESSIONS[GLOBAL_CODE] = QuizSession(code=GLOBAL_CODE)
+    storage.save_session_dict(GLOBAL_CODE, SESSIONS[GLOBAL_CODE].model_dump())
+    # Notify displays/anyone listening
+    await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
+    await sio.emit("reset", {"code": GLOBAL_CODE}, room=QUIZ_ROOM)
     return {"ok": True}
 
 @app.get("/api/admin/allowed_emails")
@@ -336,7 +431,7 @@ async def leaderboard(code: str, _: None = Depends(require_admin)):
     if not session:
         raise HTTPException(404, "Quiz not found")
     lb = sorted(session.players.values(), key=lambda p: p.score, reverse=True)
-    return [{"id": p.id, "name": p.name, "score": p.score, "participantCode": p.participant_code} for p in lb]
+    return [{"id": p.id, "name": p.name, "email": p.email, "score": p.score, "participantCode": p.participant_code, "online": bool(ACTIVE_PLAYER_SOCKETS.get(p.id))} for p in lb]
 
 
 ## (removed duplicate StartPayload definition)
@@ -373,7 +468,36 @@ async def start_quiz(code: str, payload: StartPayload | None = None, _: None = D
                 pass
     storage.save_session_dict(code, session.model_dump())
     await emit_current_question(code)
+    await _emit_answers_progress(session)
     return {"ok": True}
+
+
+@app.post("/api/admin/quiz/{code}/goto")
+async def goto_question(code: str, payload: GotoPayload, _: None = Depends(require_admin)):
+    session = SESSIONS.get(code)
+    if not session:
+        raise HTTPException(404, "Quiz not found")
+    if not session.questions:
+        return {"ok": False, "message": "No questions"}
+    target = int(payload.index)
+    if target < 0 or target >= len(session.questions):
+        raise HTTPException(422, f"Index out of range: {target}")
+    # Set quiz active and move to the target index; reset per-question state
+    session.is_active = True
+    session.current_index = target
+    session.revealed = False
+    session.current_answers = {}
+    session.current_answer_times = {}
+    session.question_started_at = time.time()
+    session.paused = False
+    session.paused_at = None
+    session.paused_accumulated = 0.0
+    storage.save_session_dict(code, session.model_dump())
+    # Hide overlays and broadcast the selected question
+    await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
+    await emit_current_question(code)
+    await _emit_answers_progress(session)
+    return {"ok": True, "index": target}
 
 
 @app.post("/api/admin/quiz/{code}/next")
@@ -405,6 +529,7 @@ async def next_question(code: str, _: None = Depends(require_admin)):
     # Ensure leaderboard is hidden when moving to the next question
     await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
     await emit_current_question(code)
+    await _emit_answers_progress(session)
     return {"ok": True}
 
 
@@ -446,14 +571,19 @@ async def reset_quiz(code: str, _: None = Depends(require_admin)):
     session = SESSIONS.get(code)
     if not session:
         raise HTTPException(404, "Quiz not found")
-    session.players = {}
+    # Keep players, but clear all questions and per-question state
     session.questions = []
     session.current_index = -1
     session.is_active = False
     session.paused = False
     session.revealed = False
     session.current_answers = {}
+    session.current_answer_times = {}
     session.question_started_at = None
+    session.paused_at = None
+    session.paused_accumulated = 0.0
+    # Hide any overlays and send everyone back to lobby
+    await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
     await sio.emit("reset", {"code": code}, room=QUIZ_ROOM)
     storage.save_session_dict(code, session.model_dump())
     return {"ok": True}
@@ -506,6 +636,33 @@ async def emit_current_question(code: str):
             await sio.emit("complete", {}, room=QUIZ_ROOM)
         session.is_active = False
     storage.save_session_dict(code, session.model_dump())
+
+
+async def _emit_answers_progress(session: QuizSession, to_sid: Optional[str] = None):
+    """Send how many and which players have locked answers to admins (or to a specific SID)."""
+    try:
+        locked_ids = list(session.current_answers.keys())
+        items = []
+        for pid in locked_ids:
+            p = session.players.get(pid)
+            if p:
+                items.append({"id": pid, "name": p.name})
+        players_list = [{"id": p.id, "name": p.name} for p in session.players.values()]
+        locked_set = set(locked_ids)
+        unlocked = [pl for pl in players_list if pl["id"] not in locked_set]
+        payload = {
+            "lockedCount": len(locked_ids),
+            "playersCount": len(session.players),
+            "locked": items,
+            "players": players_list,
+            "unlocked": unlocked,
+        }
+        if to_sid:
+            await sio.emit("answers_progress", payload, to=to_sid)
+        else:
+            await sio.emit("answers_progress", payload, room=ADMIN_ROOM)
+    except Exception:
+        pass
 
 
 @sio.event
@@ -574,6 +731,28 @@ async def join_quiz(sid, data):
         remaining = max(0.0, float(q.duration) - max(0.0, elapsed))
         await sio.emit("question", {"question": q_player, "index": session.current_index, "duration": q.duration, "startedAt": session.question_started_at, "serverTime": now, "remaining": remaining}, to=sid)
         await sio.emit("status", {"index": session.current_index, "total": len(session.questions), "paused": session.paused, "revealed": session.revealed, "duration": q.duration, "startedAt": session.question_started_at, "serverTime": now, "remaining": remaining}, to=sid)
+        # If player had previously locked, reflect that for seamless reconnection
+        if pid in session.current_answers:
+            await sio.emit("answer_locked", {"locked": True, "answer": session.current_answers.get(pid)}, to=sid)
+        # If already revealed, replay reveal and player's result
+        if session.revealed:
+            await sio.emit("reveal", {"correctAnswer": q.answer}, to=sid)
+            correct_ids: List[str] = []
+            for ppid, ans in session.current_answers.items():
+                corr = q.answer is None or str(ans).strip().lower() == str(q.answer).strip().lower()
+                if corr:
+                    correct_ids.append(ppid)
+            correct_ids.sort(key=lambda ppid: session.current_answer_times.get(ppid, float('inf')))
+            rank = (correct_ids.index(pid) + 1) if (pid in correct_ids) else None
+            def _bonus(r: int) -> int:
+                return max(0, 6 - r) if r and 1 <= r <= 5 else 0
+            player_obj = session.players.get(pid)
+            if player_obj is not None:
+                ans = session.current_answers.get(pid)
+                is_correct = q.answer is None or (ans is not None and str(ans).strip().lower() == str(q.answer).strip().lower())
+                await sio.emit("answer_result", {"correct": bool(is_correct), "score": player_obj.score, "rank": rank, "bonus": _bonus(rank) if rank else 0}, to=sid)
+        # Update admins with latest counts when someone (re)joins
+        await _emit_answers_progress(session)
 
 
 @sio.event
@@ -613,7 +792,8 @@ async def submit_answer(sid, data):
     session.current_answer_times[pid] = time.time()
     storage.save_session_dict(code, session.model_dump())
     await sio.emit("answer_submitted", {"playerId": pid, "name": p.name if p else "?"}, room=ADMIN_ROOM)
-    await sio.emit("answer_locked", {"locked": True}, to=sid)
+    await sio.emit("answer_locked", {"locked": True, "answer": str(answer)}, to=sid)
+    await _emit_answers_progress(session)
 
 
 @sio.event
@@ -671,6 +851,10 @@ async def admin_join(sid, data):
     await sio.save_session(sid, {"code": code, "admin": True})
     await sio.enter_room(sid, ADMIN_ROOM)
     await sio.emit("admin_joined", {"ok": True}, to=sid)
+    # send snapshot of current answers progress
+    session = SESSIONS.get(code)
+    if session:
+        await _emit_answers_progress(session, to_sid=sid)
 
 
 @sio.event
@@ -694,10 +878,31 @@ async def admin_command(sid, data):
         session = SESSIONS.get(code)
         if session:
             lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
-            payload = [{"id": pl.id, "name": pl.name, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
+            payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
             await sio.emit("leaderboard_show", payload, room=QUIZ_ROOM)
     elif action == "hide_leaderboard":
         await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
+
+
+@sio.event
+async def display_join(sid, data=None):
+    """Allow a display client to receive quiz-room broadcasts without being a player."""
+    code = (data or {}).get("code") if isinstance(data, dict) else None
+    code = code or GLOBAL_CODE
+    session = SESSIONS.get(code)
+    await sio.enter_room(sid, QUIZ_ROOM)
+    # Send current question and status immediately, if active
+    if session and session.is_active and 0 <= session.current_index < len(session.questions):
+        q = session.questions[session.current_index]
+        q_player = q.model_dump()
+        if "answer" in q_player:
+            q_player["answer"] = None
+        now = time.time()
+        total_paused = session.paused_accumulated + ((now - session.paused_at) if session.paused_at else 0.0)
+        elapsed = (now - session.question_started_at) - total_paused if session.question_started_at else 0.0
+        remaining = max(0.0, float(q.duration) - max(0.0, elapsed))
+        await sio.emit("question", {"question": q_player, "index": session.current_index, "duration": q.duration, "startedAt": session.question_started_at, "serverTime": now, "remaining": remaining}, to=sid)
+        await sio.emit("status", {"index": session.current_index, "total": len(session.questions), "paused": session.paused, "revealed": session.revealed, "duration": q.duration, "startedAt": session.question_started_at, "serverTime": now, "remaining": remaining}, to=sid)
 
 
 # Compose ASGI app so that both HTTP and Socket.IO share the same server
@@ -762,7 +967,11 @@ async def _reveal_answers(session: QuizSession):
             await sio.emit("answer_result", {"correct": correct, "score": player.score, "rank": rank, "bonus": bonus}, to=sid)
     # Update leaderboard for admins
     lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
-    lb_payload = [{"id": pl.id, "name": pl.name, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
+    lb_payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
+    try:
+        storage.save_leaderboard_snapshot(session.code, lb_payload)
+    except Exception:
+        pass
     await sio.emit("leaderboard", lb_payload, room=ADMIN_ROOM)
     await sio.emit("leaderboard", lb_payload, room=QUIZ_ROOM)
     # Update status for admins and players

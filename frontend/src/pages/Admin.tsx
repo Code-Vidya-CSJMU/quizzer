@@ -14,17 +14,24 @@ export default function Admin() {
   const [socket, setSocket] = useState<Socket | null>(null)
   const [connected, setConnected] = useState(false)
   const [leaderboard, setLeaderboard] = useState<any[]>([])
+  const [participants, setParticipants] = useState<any[]>([])
   const [status, setStatus] = useState<any>(null)
   const [questionJson, setQuestionJson] = useState('')
   const [builderOpen, setBuilderOpen] = useState(false)
   const [builderQ, setBuilderQ] = useState<any>({ id: '', text: '', duration: 30, hint: '', choices: [{ id: 'a', text: '' }, { id: 'b', text: '' }], answer: '' })
   const [builderList, setBuilderList] = useState<any[]>([])
   const [qsets, setQsets] = useState<{ name: string; count: number }[]>([])
+  const [snapshots, setSnapshots] = useState<{ name: string; file: string; createdAt: string; count: number }[]>([])
   const [lifelines, setLifelines] = useState<LifelinesState>({ '5050': true, hint: true })
   const [logs, setLogs] = useState<string[]>([])
+  const [lockedStats, setLockedStats] = useState<{ lockedCount: number; playersCount: number; locked: { id: string; name: string }[]; unlocked?: { id: string; name: string }[]; players?: { id: string; name: string }[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [allowedEmailsText, setAllowedEmailsText] = useState('')
+  const [allowedEmails, setAllowedEmails] = useState<string[]>([])
   const [showAllowed, setShowAllowed] = useState(false)
+  const [search, setSearch] = useState('')
+  const [gotoIndex, setGotoIndex] = useState<string>('')
+  const [questions, setQuestions] = useState<any[]>([])
 
   function appendLog(line: string) { setLogs(l => [new Date().toLocaleTimeString() + ' ' + line, ...l].slice(0, 200)) }
 
@@ -36,18 +43,35 @@ export default function Admin() {
       setConnected(true)
       s.emit('admin_join', { token }) // global quiz (code omitted)
       appendLog('Socket connected')
+      refreshParticipants()
+      loadAllowed()
     })
     s.on('connect_error', (err) => { appendLog('connect_error: ' + err.message) })
     s.on('error', (err) => { appendLog('error event: ' + (err?.message || JSON.stringify(err))) })
     s.io.on('reconnect_attempt', (n: number) => appendLog('reconnect attempt #' + n))
     s.on('disconnect', () => { setConnected(false); appendLog('Socket disconnected') })
     s.on('leaderboard', (lb) => { setLeaderboard(lb) })
-    s.on('status', (st) => setStatus(st))
+  s.on('status', (st) => setStatus(st))
+    s.on('answers_progress', (p) => {
+      setLockedStats(p)
+      appendLog(`Locked ${p.lockedCount}/${p.playersCount}`)
+      refreshParticipants()
+    })
     s.on('lifelines', (lf) => setLifelines(lf))
-  s.on('answer_submitted', (ans) => appendLog(`Answer locked: ${ans.name}`))
+  s.on('answer_submitted', (ans) => { appendLog(`Answer locked: ${ans.name}`); refreshParticipants() })
     s.on('lifeline_used', (lf) => appendLog(`Lifeline: ${lf.name} used ${lf.lifeline}`))
     s.on('question', (q) => appendLog(`Question broadcast: ${q.text}`))
     setSocket(s)
+  }
+
+  async function refreshParticipants() {
+    try {
+      const r = await fetch(api('/api/admin/leaderboard'), { headers: { 'X-Admin-Token': token } })
+      if (r.ok) {
+        const data = await r.json()
+        setParticipants(Array.isArray(data) ? data : [])
+      }
+    } catch {}
   }
 
   async function ensureSession() {
@@ -67,6 +91,7 @@ export default function Admin() {
       })
       if (!r.ok) throw new Error('Upload failed')
       appendLog(`Uploaded ${questions.length} questions`)
+  loadCurrentQuestions()
     } catch (e: any) {
       appendLog('Upload error: ' + (e.message || 'invalid JSON'))
       alert('Invalid or failed JSON upload')
@@ -100,7 +125,7 @@ export default function Admin() {
   async function applyQset(name: string) {
     await ensureSession()
   const r = await fetch(api('/api/admin/question_sets/apply'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ name }) })
-    if (r.ok) { const d = await r.json(); appendLog(`Applied set '${name}' (${d.count} questions)`) }
+  if (r.ok) { const d = await r.json(); appendLog(`Applied set '${name}' (${d.count} questions)`); loadCurrentQuestions() }
   }
 
   async function exportCurrent() {
@@ -112,7 +137,36 @@ export default function Admin() {
     }
   }
 
-  useEffect(() => { if (token) listQsets() }, [token])
+  async function listSnapshots() {
+    const r = await fetch(api('/api/admin/leaderboard/snapshots'), { headers: { 'X-Admin-Token': token } })
+    if (r.ok) {
+      const data = await r.json()
+      setSnapshots(data.items || [])
+      appendLog('Loaded leaderboard snapshots')
+    }
+  }
+
+  async function loadCurrentQuestions() {
+    try {
+      const r = await fetch(api('/api/admin/questions/export'), { method: 'POST', headers: { 'X-Admin-Token': token } })
+      if (r.ok) {
+        const data = await r.json()
+        const arr = Array.isArray(data.questions) ? data.questions : []
+        setQuestions(arr)
+      }
+    } catch {}
+  }
+
+  async function applySnapshot(file: string) {
+    const r = await fetch(api('/api/admin/leaderboard/snapshots/apply'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ file }) })
+    if (r.ok) {
+      appendLog('Applied snapshot: ' + file)
+    } else {
+      appendLog('Failed applying snapshot: ' + file)
+    }
+  }
+
+  useEffect(() => { if (token) { listQsets(); refreshParticipants(); loadAllowed(); listSnapshots(); loadCurrentQuestions() } }, [token])
 
   function addChoice() {
     setBuilderQ((q: any) => ({ ...q, choices: [...(q.choices || []), { id: String.fromCharCode(97 + (q.choices?.length || 0)), text: '' }] }))
@@ -143,11 +197,27 @@ export default function Admin() {
   async function reveal() { await fetch(api(`/api/admin/reveal`), { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Reveal triggered') }
   async function updateLifelines() { await fetch(api(`/api/admin/lifelines`), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ lifelines }) }); appendLog('Lifelines updated') }
 
+  async function gotoQuestionIndex() {
+    const val = gotoIndex.trim()
+    if (!val) return
+    const idx = Number(val)
+    if (!Number.isInteger(idx)) { alert('Enter a valid integer index (0-based)'); return }
+    const r = await fetch(api(`/api/admin/goto`), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ index: idx }) })
+    if (r.ok) {
+      const d = await r.json().catch(() => ({}))
+      appendLog(`Jumped to question index ${d.index ?? idx}`)
+    } else {
+      alert('Failed to jump to that index')
+    }
+  }
+
   async function loadAllowed() {
   const r = await fetch(api('/api/admin/allowed_emails'), { headers: { 'X-Admin-Token': token } })
     if (r.ok) {
       const data = await r.json()
-      setAllowedEmailsText(data.emails.join('\n'))
+  const list = Array.isArray(data.emails) ? data.emails : []
+  setAllowedEmailsText(list.join('\n'))
+  setAllowedEmails(list)
       appendLog('Loaded allowed emails')
     }
   }
@@ -156,7 +226,8 @@ export default function Admin() {
   const r = await fetch(api('/api/admin/allowed_emails'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ emails, mode }) })
     if (r.ok) {
       const data = await r.json()
-      appendLog(`Saved allowed emails (${data.count})`)
+  setAllowedEmails(data.emails || emails)
+  appendLog(`Saved allowed emails (${data.count})`)
     } else {
       appendLog('Failed saving allowed emails')
     }
@@ -173,6 +244,117 @@ export default function Admin() {
     <div className="max-w-6xl mx-auto p-4 sm:p-8">
       <h1 className="text-3xl font-bold mb-1">Admin Console (Global Quiz)</h1>
       <p className="text-slate-600 mb-4">Steps: 1) Enter admin token 2) (Optional) Load sample & Upload 3) Start 4) Next / Pause / Reveal / Reset.</p>
+
+      <section className="border border-slate-200 rounded-xl p-4 mb-4">
+        <h2 className="text-lg font-semibold">Answers Progress</h2>
+        {!lockedStats && (
+          <p className="text-sm text-slate-600 mt-1">No data yet. Start the quiz or wait for a question.</p>
+        )}
+        {lockedStats && (
+          <>
+            <div className="mt-2 text-sm text-slate-700 flex items-center gap-3">
+              <span className="text-indigo-800 bg-indigo-100 px-2 py-0.5 rounded text-xs">Locked {lockedStats.lockedCount}/{lockedStats.playersCount}</span>
+            </div>
+            <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs text-slate-700">
+              <div>
+                <div className="font-semibold mb-1">Answered ({lockedStats.lockedCount})</div>
+                <ul className="space-y-1 max-h-32 overflow-auto">
+                  {lockedStats.locked.map((p: any) => (
+                    <li key={p.id} className="border border-emerald-200 bg-emerald-50 text-emerald-900 rounded px-2 py-1">{p.name}</li>
+                  ))}
+                  {lockedStats.locked.length === 0 && <li className="text-slate-500">None yet</li>}
+                </ul>
+              </div>
+              <div>
+                <div className="font-semibold mb-1">Not Answered ({Math.max(0, (lockedStats.playersCount || 0) - (lockedStats.lockedCount || 0))})</div>
+                <ul className="space-y-1 max-h-32 overflow-auto">
+                  {(lockedStats.unlocked || (lockedStats.players || []).filter((pl: any) => !lockedStats.locked.find((lp: any) => lp.id === pl.id))).map((p: any) => (
+                    <li key={p.id} className="border border-rose-200 bg-rose-50 text-rose-900 rounded px-2 py-1">{p.name}</li>
+                  ))}
+                  {((lockedStats.unlocked || []).length === 0) && <li className="text-slate-500">All answered</li>}
+                </ul>
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="border border-slate-200 rounded-xl p-4 mb-4">
+        <h2 className="text-lg font-semibold">Leaderboard Snapshots</h2>
+        <div className="mt-2 flex gap-2 flex-wrap items-center">
+          <button onClick={listSnapshots} disabled={!token}>Refresh</button>
+        </div>
+        {snapshots.length === 0 && <p className="text-sm text-slate-600 mt-2">No snapshots yet. A snapshot is saved automatically after each reveal.</p>}
+    {snapshots.length > 0 && (
+          <div className="mt-2">
+            <table className="w-full text-sm">
+      <thead><tr className="text-left"><th>When (UTC)</th><th>Entries</th><th>File</th><th>Action</th></tr></thead>
+              <tbody>
+                {snapshots.map(s => (
+                  <tr key={s.file} className="border-t border-slate-100">
+        <td>{(s as any).createdAtHuman || s.createdAt || '-'}</td>
+                    <td>{s.count}</td>
+                    <td className="truncate">{s.file}</td>
+                    <td><button onClick={() => applySnapshot(s.file)} disabled={!token}>Apply</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="border border-slate-200 rounded-xl p-4 mb-4">
+        <h2 className="text-lg font-semibold">Participants</h2>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input className="w-64" placeholder="Search name or email" value={search} onChange={e => setSearch(e.target.value)} />
+          {(() => {
+            const online = participants.filter((p: any) => !!p.online)
+            const onlineEmails = new Set(online.map((p: any) => (p.participantCode || '').toLowerCase()).filter(Boolean))
+            const notJoinedCount = allowedEmails.length ? Math.max(0, allowedEmails.length - onlineEmails.size) : 0
+            return (
+              <span className="text-xs text-slate-600">Joined: <span className="font-semibold text-emerald-700">{online.length}</span>{allowedEmails.length ? <> · Not joined: <span className="font-semibold text-rose-700">{notJoinedCount}</span></> : null}</span>
+            )
+          })()}
+        </div>
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="border border-emerald-200 bg-emerald-50 rounded-lg p-3">
+            <div className="text-sm font-semibold text-emerald-800 mb-2">Joined</div>
+            <ul className="space-y-1 max-h-56 overflow-auto">
+              {participants
+                .filter((p: any) => !!p.online)
+                .filter(p => {
+                  const q = search.trim().toLowerCase()
+                  if (!q) return true
+                  const email = (p.participantCode || '').toLowerCase()
+                  return p.name.toLowerCase().includes(q) || email.includes(q)
+                })
+                .map(p => (
+                  <li key={p.id} className="flex items-center justify-between text-sm text-emerald-900 bg-white/70 border border-emerald-200 rounded px-2 py-1">
+                    <span className="truncate"><span className="font-medium">{p.name}</span> <span className="text-slate-500">({p.participantCode || '—'})</span></span>
+                    <span className="text-emerald-700 text-xs">joined</span>
+                  </li>
+                ))}
+              {participants.filter((p: any) => !!p.online).length === 0 && <li className="text-xs text-slate-500">No one online yet.</li>}
+            </ul>
+          </div>
+          <div className="border border-rose-200 bg-rose-50 rounded-lg p-3">
+            <div className="text-sm font-semibold text-rose-800 mb-2">Not Joined {allowedEmails.length ? `(${allowedEmails.length})` : ''}</div>
+            <ul className="space-y-1 max-h-56 overflow-auto">
+              {(() => {
+                const online = participants.filter((p: any) => !!p.online)
+                const joined = new Set(online.map((p: any) => (p.participantCode || '').toLowerCase()).filter(Boolean))
+                const items = (allowedEmails || [])
+                  .filter(e => e && !joined.has(e.toLowerCase()))
+                  .filter(e => e.toLowerCase().includes(search.trim().toLowerCase()))
+                return items.length > 0 ? items.map(e => (
+                  <li key={e} className="text-sm text-rose-900 bg-white/70 border border-rose-200 rounded px-2 py-1">{e}</li>
+                )) : <li className="text-xs text-slate-500">{allowedEmails.length ? 'All allowed participants have joined.' : 'No allowed list configured.'}</li>
+              })()}
+            </ul>
+          </div>
+        </div>
+      </section>
 
       <section className="border border-slate-200 rounded-xl p-4 mb-4">
         <h2 className="text-lg font-semibold">Connection</h2>
@@ -313,6 +495,22 @@ export default function Admin() {
           <button onClick={async () => { await fetch(api('/api/admin/leaderboard/show'), { method: 'POST', headers: { 'X-Admin-Token': token } }) }} disabled={!token}>Show Leaderboard</button>
           <button onClick={async () => { await fetch(api('/api/admin/leaderboard/hide'), { method: 'POST', headers: { 'X-Admin-Token': token } }) }} disabled={!token}>Hide Leaderboard</button>
           <button onClick={reset} disabled={!token}>Reset</button>
+          <button onClick={async () => { await fetch(api('/api/admin/leaderboard/reset'), { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Leaderboard reset to zero') }} disabled={!token}>Reset Leaderboard</button>
+          <button onClick={async () => { if (confirm('Full reset will disconnect everyone and clear all sessions. Continue?')) { await fetch(api('/api/admin/full_reset'), { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Full reset executed') } }} disabled={!token}>
+            Full Reset (Fresh Start)
+          </button>
+          <div className="flex items-center gap-2 ml-2">
+            <select className="min-w-[16rem]" value={gotoIndex} onChange={e => setGotoIndex(e.target.value)} disabled={!token || questions.length === 0}>
+              <option value="">Go to question…</option>
+              {questions.map((q: any, i: number) => (
+                <option key={q.id || i} value={String(i)}>
+                  {`${i + 1}. ${q.id ? '[' + q.id + '] ' : ''}${String(q.text || '').slice(0, 80)}`}
+                </option>
+              ))}
+            </select>
+            <button onClick={gotoQuestionIndex} disabled={!token || !gotoIndex.trim()}>Go</button>
+            <button title="Refresh questions" onClick={loadCurrentQuestions} disabled={!token}>↻</button>
+          </div>
         </div>
         {status && (
           <div className="mt-2 text-sm text-slate-700 flex items-center gap-3">
@@ -338,10 +536,10 @@ export default function Admin() {
           {leaderboard.length === 0 && <p className="text-sm text-slate-600">No players yet.</p>}
           {leaderboard.length > 0 && (
             <table className="w-full text-sm">
-              <thead><tr className="text-left"><th>#</th><th>Name</th><th>Email Code</th><th className="text-right">Score</th></tr></thead>
+              <thead><tr className="text-left"><th>#</th><th>Name</th><th>Email</th><th>Email Code</th><th className="text-right">Score</th></tr></thead>
               <tbody>
                 {leaderboard.map((p, i) => (
-                  <tr key={p.id} className="border-t border-slate-100"><td>{i + 1}</td><td>{p.name}</td><td>{p.participantCode || ''}</td><td className="text-right">{p.score}</td></tr>
+                  <tr key={p.id} className="border-t border-slate-100"><td>{i + 1}</td><td>{p.name}</td><td>{p.email || ''}</td><td>{p.participantCode || ''}</td><td className="text-right">{p.score}</td></tr>
                 ))}
               </tbody>
             </table>
