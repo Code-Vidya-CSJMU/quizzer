@@ -16,12 +16,10 @@ GLOBAL_CODE = "GLOBAL"  # single quiz identifier (internal)
 QUIZ_ROOM = "quiz"
 ADMIN_ROOM = "admin"
 app = FastAPI(title="Quizzer API")
-# CORS: allow origins from env (comma-separated), default to '*'.
-_allowed = os.getenv("ALLOWED_ORIGINS", "*")
-_origins = [o.strip() for o in _allowed.split(",") if o.strip()] if _allowed != "*" else ["*"]
+# CORS: allow ALL origins explicitly (no cookies used, so this is safe)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_origins,
+    allow_origins=["*"],
     allow_credentials=False,  # safer with '*' and we don't use cookies
     allow_methods=["*"],
     allow_headers=["*"],
@@ -478,10 +476,9 @@ async def set_lifelines(code: str, payload: LifelinesPayload, _: None = Depends(
 
 
 # --- Socket.IO server (ASGI) ---
-_sio_cors = _origins if _origins != ["*"] else "*"
 sio = socketio.AsyncServer(
     async_mode="asgi",
-    cors_allowed_origins=_sio_cors,
+    cors_allowed_origins="*",
     transports=["websocket"],  # reduce overhead: disable long-polling
 )
 
