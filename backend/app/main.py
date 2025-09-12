@@ -25,6 +25,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Per-question max points awarded proportional to remaining time (granular scoring)
+MAX_POINTS_PER_QUESTION = int(os.getenv("MAX_POINTS_PER_QUESTION", "1000"))
+
 
 @app.get("/health")
 async def health():
@@ -53,6 +56,9 @@ class Player(BaseModel):
     participant_code: Optional[str] = None  # now simply the email value
     score: int = 0
     lifelines: Dict[str, bool] = Field(default_factory=lambda: {"5050": True, "hint": True})
+    # Tie-break metrics
+    correct_firsts: int = 0
+    cumulative_answer_time: float = 0.0
 
 
 class QuizSession(BaseModel):
@@ -70,6 +76,22 @@ class QuizSession(BaseModel):
     paused_at: Optional[float] = None  # when pause started (if paused)
     paused_accumulated: float = 0.0  # total paused seconds for current question
     current_answer_times: Dict[str, float] = Field(default_factory=dict)  # playerId -> submit time (server epoch)
+    # Sudden-death control: restrict answering to a subset of players
+    sudden_death_active: bool = False
+    sudden_death_allowed: Optional[List[str]] = None
+
+
+def _sort_players_for_leaderboard(players: List[Player]) -> List[Player]:
+    # Sort by: score desc, correct_firsts desc, cumulative_answer_time asc, name asc
+    return sorted(
+        players,
+        key=lambda p: (
+            -(p.score or 0),
+            -(p.correct_firsts or 0),
+            (p.cumulative_answer_time or 0.0),
+            (p.name or ""),
+        ),
+    )
 
 
 # --- Request / Response Models (declared early to avoid forward-ref issues) ---
@@ -139,6 +161,65 @@ class AllowedEmailsPayload(BaseModel):
 
 class SnapshotFilePayload(BaseModel):
     file: str
+
+
+class SuddenDeathStartPayload(BaseModel):
+    playerIds: Optional[List[str]] = None  # if omitted, include all current top-scoring ones or all players
+    topN: Optional[int] = None  # if provided, pick top N by leaderboard
+
+
+@app.post("/api/admin/sudden_death/start")
+async def sudden_death_start(payload: SuddenDeathStartPayload | None = None, _: None = Depends(require_admin)):
+    session = SESSIONS.get(GLOBAL_CODE)
+    if not session:
+        raise HTTPException(404, "Quiz not found")
+    # Choose eligible players
+    players_sorted = _sort_players_for_leaderboard(list(session.players.values()))
+    if payload and payload.playerIds:
+        allowed = [pid for pid in payload.playerIds if pid in session.players]
+    elif payload and payload.topN:
+        allowed = [p.id for p in players_sorted[: max(0, int(payload.topN))]]
+    else:
+        # default: all players currently in session
+        allowed = [p.id for p in players_sorted]
+    session.sudden_death_active = True
+    session.sudden_death_allowed = allowed
+    storage.save_session_dict(GLOBAL_CODE, session.model_dump())
+    await sio.emit("sudden_death", {"active": True, "allowed": allowed}, room=QUIZ_ROOM)
+    return {"ok": True, "count": len(allowed)}
+
+
+@app.post("/api/admin/sudden_death/stop")
+async def sudden_death_stop(_: None = Depends(require_admin)):
+    session = SESSIONS.get(GLOBAL_CODE)
+    if not session:
+        raise HTTPException(404, "Quiz not found")
+    session.sudden_death_active = False
+    session.sudden_death_allowed = None
+    storage.save_session_dict(GLOBAL_CODE, session.model_dump())
+    await sio.emit("sudden_death", {"active": False}, room=QUIZ_ROOM)
+    return {"ok": True}
+
+
+@app.get("/api/admin/final_results")
+async def final_results(_: None = Depends(require_admin)):
+    session = SESSIONS.get(GLOBAL_CODE)
+    if not session:
+        raise HTTPException(404, "Quiz not found")
+    lb = _sort_players_for_leaderboard(list(session.players.values()))
+    # Provide tie-break info in admin result
+    out = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "score": p.score,
+            "firsts": p.correct_firsts,
+            "cumTime": round(float(p.cumulative_answer_time or 0.0), 3),
+        }
+        for p in lb
+    ]
+    await sio.emit("final_results", {"leaderboard": out}, room=ADMIN_ROOM)
+    return {"leaderboard": out}
 
 
 @app.post("/api/admin/quiz", response_model=CreateQuizResponse)
@@ -241,8 +322,8 @@ async def leaderboard_show_global(_: None = Depends(require_admin)):
     session = SESSIONS.get(GLOBAL_CODE)
     if not session:
         raise HTTPException(404, "Quiz not found")
-    lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
-    payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
+    lb = _sort_players_for_leaderboard(list(session.players.values()))
+    payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code, "firsts": pl.correct_firsts, "cumTime": round(float(pl.cumulative_answer_time or 0.0), 3)} for pl in lb]
     await sio.emit("leaderboard_show", payload, room=QUIZ_ROOM)
     return {"ok": True}
 
@@ -295,6 +376,8 @@ async def leaderboard_reset_global(_: None = Depends(require_admin)):
     # Zero scores for all players
     for p in session.players.values():
         p.score = 0
+    p.correct_firsts = 0
+    p.cumulative_answer_time = 0.0
     storage.save_session_dict(GLOBAL_CODE, session.model_dump())
     # Broadcast updated leaderboard snapshot
     lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
@@ -462,8 +545,17 @@ async def leaderboard(code: str, _: None = Depends(require_admin)):
     session = SESSIONS.get(code)
     if not session:
         raise HTTPException(404, "Quiz not found")
-    lb = sorted(session.players.values(), key=lambda p: p.score, reverse=True)
-    return [{"id": p.id, "name": p.name, "email": p.email, "score": p.score, "participantCode": p.participant_code, "online": bool(ACTIVE_PLAYER_SOCKETS.get(p.id))} for p in lb]
+    lb = _sort_players_for_leaderboard(list(session.players.values()))
+    return [{"id": p.id, "name": p.name, "email": p.email, "score": p.score, "participantCode": p.participant_code, "online": bool(ACTIVE_PLAYER_SOCKETS.get(p.id)), "firsts": p.correct_firsts, "cumTime": round(float(p.cumulative_answer_time or 0.0), 3)} for p in lb]
+
+
+@app.get("/api/quiz/leaderboard")
+async def public_leaderboard():
+    session = SESSIONS.get(GLOBAL_CODE)
+    if not session:
+        raise HTTPException(404, "Quiz not found")
+    lb = _sort_players_for_leaderboard(list(session.players.values()))
+    return [{"name": p.name, "score": p.score} for p in lb]
 
 
 ## (removed duplicate StartPayload definition)
@@ -618,6 +710,8 @@ async def reset_quiz(code: str, _: None = Depends(require_admin)):
     session.question_started_at = None
     session.paused_at = None
     session.paused_accumulated = 0.0
+    session.sudden_death_active = False
+    session.sudden_death_allowed = None
     # Hide any overlays and send everyone back to lobby
     await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
     await sio.emit("reset", {"code": code}, room=QUIZ_ROOM)
@@ -671,6 +765,22 @@ async def emit_current_question(code: str):
         if session.is_active:
             await sio.emit("complete", {}, room=QUIZ_ROOM)
         session.is_active = False
+        # Emit final results (with tie-break info) to admins
+        lb = _sort_players_for_leaderboard(list(session.players.values())) if session.players else []
+        out = [
+            {
+                "id": p.id,
+                "name": p.name,
+                "score": p.score,
+                "firsts": p.correct_firsts,
+                "cumTime": round(float(p.cumulative_answer_time or 0.0), 3),
+            }
+            for p in lb
+        ]
+        await sio.emit("final_results", {"leaderboard": out}, room=ADMIN_ROOM)
+        # End sudden-death if any
+        session.sudden_death_active = False
+        session.sudden_death_allowed = None
     storage.save_session_dict(code, session.model_dump())
 
 
@@ -780,13 +890,24 @@ async def join_quiz(sid, data):
                     correct_ids.append(ppid)
             correct_ids.sort(key=lambda ppid: session.current_answer_times.get(ppid, float('inf')))
             rank = (correct_ids.index(pid) + 1) if (pid in correct_ids) else None
-            def _bonus(r: int) -> int:
-                return max(0, 6 - r) if r and 1 <= r <= 5 else 0
             player_obj = session.players.get(pid)
             if player_obj is not None:
                 ans = session.current_answers.get(pid)
                 is_correct = q.answer is None or (ans is not None and str(ans).strip().lower() == str(q.answer).strip().lower())
-                await sio.emit("answer_result", {"correct": bool(is_correct), "score": player_obj.score, "rank": rank, "bonus": _bonus(rank) if rank else 0}, to=sid)
+                # Compute time-based bonus consistent with reveal scoring
+                submit_ts = session.current_answer_times.get(pid, session.question_started_at or time.time())
+                paused_total = session.paused_accumulated or 0.0
+                elapsed = 0.0
+                if session.question_started_at:
+                    elapsed = max(0.0, submit_ts - session.question_started_at - paused_total)
+                dur = float(q.duration or 0)
+                clamped_elapsed = min(max(elapsed, 0.0), dur if dur > 0 else elapsed)
+                if is_correct and dur > 0:
+                    rem = max(0.0, dur - clamped_elapsed)
+                    bonus = int(round(MAX_POINTS_PER_QUESTION * (rem / dur)))
+                else:
+                    bonus = 0
+                await sio.emit("answer_result", {"correct": bool(is_correct), "score": player_obj.score, "rank": rank, "bonus": bonus}, to=sid)
         # Update admins with latest counts when someone (re)joins
         await _emit_answers_progress(session)
 
@@ -814,6 +935,12 @@ async def submit_answer(sid, data):
         await sio.emit("answer_rejected", {"reason": "no_active_question"}, to=sid)
         return
     q = session.questions[idx]
+    # Sudden-death eligibility gating: only allow listed players to answer when active
+    if session.sudden_death_active:
+        allowed = set(session.sudden_death_allowed or [])
+        if pid not in allowed:
+            await sio.emit("answer_rejected", {"reason": "sudden_death_not_allowed"}, to=sid)
+            return
     # Time expiry (account for paused time)
     now = time.time()
     total_paused = session.paused_accumulated + ((now - session.paused_at) if session.paused_at else 0.0)
@@ -914,7 +1041,7 @@ async def admin_command(sid, data):
     elif action == "show_leaderboard":
         session = SESSIONS.get(code)
         if session:
-            lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
+            lb = _sort_players_for_leaderboard(list(session.players.values()))
             payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
             await sio.emit("leaderboard_show", payload, room=QUIZ_ROOM)
     elif action == "hide_leaderboard":
@@ -977,16 +1104,34 @@ async def _reveal_answers(session: QuizSession):
             correct_ids.append(pid)
     # Sort correct responders by submission time (earlier is better)
     correct_ids.sort(key=lambda pid: session.current_answer_times.get(pid, float('inf')))
-    base_points = 10
-    def bonus_for_rank(rank: int) -> int:
-        # 1st..5th get 5..1 bonus; others 0
-        return max(0, 6 - rank) if 1 <= rank <= 5 else 0
-    # Award scores
-    for idx, pid in enumerate(correct_ids, start=1):
+    # Track first-correct for tie-breaks
+    if correct_ids:
+        first_pid = correct_ids[0]
+        first_player = session.players.get(first_pid)
+        if first_player:
+            first_player.correct_firsts = int(first_player.correct_firsts or 0) + 1
+    # Award scores purely based on remaining time and capture cumulative time for correct answers
+    per_player_awarded: Dict[str, int] = {}
+    for pid in correct_ids:
         player = session.players.get(pid)
         if not player:
             continue
-        player.score += base_points + bonus_for_rank(idx)
+        submit_ts = session.current_answer_times.get(pid, session.question_started_at or time.time())
+        paused_total = session.paused_accumulated or 0.0
+        elapsed = 0.0
+        if session.question_started_at:
+            elapsed = max(0.0, submit_ts - session.question_started_at - paused_total)
+        # Clamp to question duration
+        dur = float(q.duration or 0)
+        clamped_elapsed = min(max(elapsed, 0.0), dur if dur > 0 else elapsed)
+        if dur > 0:
+            rem = max(0.0, dur - clamped_elapsed)
+            awarded = int(round(MAX_POINTS_PER_QUESTION * (rem / dur)))
+        else:
+            awarded = 0
+        player.score += awarded
+        per_player_awarded[pid] = awarded
+        player.cumulative_answer_time = float(player.cumulative_answer_time or 0.0) + float(clamped_elapsed)
     session.revealed = True
     # Emit reveal to players (include correct answer id/text)
     reveal_payload = {"correctAnswer": q.answer}
@@ -1000,11 +1145,24 @@ async def _reveal_answers(session: QuizSession):
         sid = ACTIVE_PLAYER_SOCKETS.get(pid)
         if sid:
             rank = (correct_ids.index(pid) + 1) if correct and pid in correct_ids else None
-            bonus = bonus_for_rank(rank) if rank else 0
-            await sio.emit("answer_result", {"correct": correct, "score": player.score, "rank": rank, "bonus": bonus}, to=sid)
+            # Informational: report awarded points based on the player submission
+            submit_ts = session.current_answer_times.get(pid, session.question_started_at or time.time())
+            paused_total = session.paused_accumulated or 0.0
+            elapsed = 0.0
+            if session.question_started_at:
+                elapsed = max(0.0, submit_ts - session.question_started_at - paused_total)
+            dur = float(q.duration or 0)
+            clamped_elapsed = min(max(elapsed, 0.0), dur if dur > 0 else elapsed)
+            if correct and dur > 0:
+                rem = max(0.0, dur - clamped_elapsed)
+                awarded = int(round(MAX_POINTS_PER_QUESTION * (rem / dur)))
+            else:
+                awarded = 0
+            # Keep legacy 'bonus' field for compatibility; add 'awarded'
+            await sio.emit("answer_result", {"correct": correct, "score": player.score, "rank": rank, "bonus": awarded, "awarded": awarded}, to=sid)
     # Update leaderboard for admins
-    lb = sorted(session.players.values(), key=lambda pl: pl.score, reverse=True)
-    lb_payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code} for pl in lb]
+    lb = _sort_players_for_leaderboard(list(session.players.values()))
+    lb_payload = [{"id": pl.id, "name": pl.name, "email": pl.email, "score": pl.score, "participantCode": pl.participant_code, "firsts": pl.correct_firsts, "cumTime": round(float(pl.cumulative_answer_time or 0.0), 3)} for pl in lb]
     try:
         storage.save_leaderboard_snapshot(session.code, lb_payload)
     except Exception:

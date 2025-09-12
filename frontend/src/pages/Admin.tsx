@@ -32,6 +32,7 @@ export default function Admin() {
   const [search, setSearch] = useState('')
   const [gotoIndex, setGotoIndex] = useState<string>('')
   const [questions, setQuestions] = useState<any[]>([])
+  const [topN, setTopN] = useState<string>('3')
 
   function appendLog(line: string) { setLogs(l => [new Date().toLocaleTimeString() + ' ' + line, ...l].slice(0, 200)) }
 
@@ -66,7 +67,7 @@ export default function Admin() {
 
   async function refreshParticipants() {
     try {
-      const r = await fetch(api('/api/admin/leaderboard'), { headers: { 'X-Admin-Token': token } })
+  const r = await fetch(api('/api/admin/leaderboard'), { headers: { 'X-Admin-Token': token } })
       if (r.ok) {
         const data = await r.json()
         setParticipants(Array.isArray(data) ? data : [])
@@ -224,6 +225,34 @@ export default function Admin() {
   async function reset() { await fetch(api(`/api/admin/reset`), { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Quiz reset') }
   async function reveal() { await fetch(api(`/api/admin/reveal`), { method: 'POST', headers: { 'X-Admin-Token': token } }); appendLog('Reveal triggered') }
   async function updateLifelines() { await fetch(api(`/api/admin/lifelines`), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ lifelines }) }); appendLog('Lifelines updated') }
+
+  async function suddenDeathStart() {
+    const n = Number(topN)
+    const body: any = {}
+    if (Number.isInteger(n) && n > 0) body.topN = n
+    const r = await fetch(api('/api/admin/sudden_death/start'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify(body) })
+    if (r.ok) {
+      const d = await r.json().catch(() => ({}))
+      appendLog(`Sudden death started (allowed ${d.count ?? '?'})`)
+    } else {
+      appendLog('Failed to start sudden death')
+    }
+  }
+  async function suddenDeathStop() {
+    const r = await fetch(api('/api/admin/sudden_death/stop'), { method: 'POST', headers: { 'X-Admin-Token': token } })
+    if (r.ok) appendLog('Sudden death stopped')
+    else appendLog('Failed to stop sudden death')
+  }
+  async function fetchFinalResults() {
+    const r = await fetch(api('/api/admin/final_results'), { headers: { 'X-Admin-Token': token } })
+    if (r.ok) {
+      const d = await r.json().catch(() => ({}))
+      const top = (d.leaderboard || []).slice(0, 5).map((p: any, i: number) => `${i + 1}. ${p.name} (${p.score}) firsts:${p.firsts} time:${p.cumTime}s`).join(' | ')
+      appendLog('Final results: ' + top)
+    } else {
+      appendLog('Failed to fetch final results')
+    }
+  }
 
   async function gotoQuestionIndex() {
     const val = gotoIndex.trim()
@@ -564,10 +593,10 @@ export default function Admin() {
           {leaderboard.length === 0 && <p className="text-sm text-slate-600">No players yet.</p>}
           {leaderboard.length > 0 && (
             <table className="w-full text-sm">
-              <thead><tr className="text-left"><th>#</th><th>Name</th><th>Email</th><th>Email Code</th><th className="text-right">Score</th></tr></thead>
+              <thead><tr className="text-left"><th>#</th><th>Name</th><th>Email</th><th>Email Code</th><th className="text-right">Score</th><th className="text-right">Firsts</th><th className="text-right">Cum Time (s)</th></tr></thead>
               <tbody>
                 {leaderboard.map((p, i) => (
-                  <tr key={p.id} className="border-t border-slate-100"><td>{i + 1}</td><td>{p.name}</td><td>{p.email || ''}</td><td>{p.participantCode || ''}</td><td className="text-right">{p.score}</td></tr>
+                  <tr key={p.id} className="border-t border-slate-100"><td>{i + 1}</td><td>{p.name}</td><td>{p.email || ''}</td><td>{p.participantCode || ''}</td><td className="text-right">{p.score}</td><td className="text-right">{(p as any).firsts ?? '-'}</td><td className="text-right">{(p as any).cumTime ?? '-'}</td></tr>
                 ))}
               </tbody>
             </table>
@@ -587,6 +616,11 @@ export default function Admin() {
         <div className="flex gap-2 flex-wrap mt-2">
           <button onClick={disconnectAll} disabled={!token}>Disconnect Everyone</button>
           <button onClick={clearSnapshots} disabled={!token}>Clear Leaderboard Snapshots</button>
+          <span className="ml-2 text-slate-500">|</span>
+          <input className="w-24" placeholder="Top N" value={topN} onChange={e => setTopN(e.target.value)} />
+          <button onClick={suddenDeathStart} disabled={!token}>Start Sudden Death</button>
+          <button onClick={suddenDeathStop} disabled={!token}>Stop Sudden Death</button>
+          <button onClick={fetchFinalResults} disabled={!token}>Final Results</button>
         </div>
         <p className="text-xs text-slate-600 mt-1">These actions are immediate and cannot be undone.</p>
       </section>
