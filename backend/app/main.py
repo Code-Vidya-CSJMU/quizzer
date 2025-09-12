@@ -336,6 +336,37 @@ async def full_reset_global(_: None = Depends(require_admin)):
     await sio.emit("reset", {"code": GLOBAL_CODE}, room=QUIZ_ROOM)
     return {"ok": True}
 
+
+@app.post("/api/admin/disconnect_all")
+async def disconnect_all(_: None = Depends(require_admin)):
+    """Disconnect all connected quiz clients (players and displays)."""
+    count = 0
+    # Disconnect all tracked player sockets
+    for sid in list(ACTIVE_PLAYER_SOCKETS.values()):
+        try:
+            await sio.disconnect(sid)
+            count += 1
+        except Exception:
+            pass
+    ACTIVE_PLAYER_SOCKETS.clear()
+    SID_TO_PLAYER.clear()
+    # Also try to clear quiz room by emitting a reset notice (clients may voluntarily disconnect)
+    try:
+        await sio.emit("reset", {"code": GLOBAL_CODE}, room=QUIZ_ROOM)
+    except Exception:
+        pass
+    return {"ok": True, "disconnected": count}
+
+
+@app.post("/api/admin/leaderboard/snapshots/clear")
+async def leaderboard_snapshots_clear(_: None = Depends(require_admin)):
+    """Delete all leaderboard snapshots for the global quiz."""
+    try:
+        deleted = storage.delete_leaderboard_snapshots(GLOBAL_CODE)
+    except Exception:
+        deleted = 0
+    return {"ok": True, "deleted": deleted}
+
 @app.get("/api/admin/allowed_emails")
 async def get_allowed_emails_global(_: None = Depends(require_admin)):
     sess = SESSIONS.get(GLOBAL_CODE)
@@ -421,7 +452,8 @@ async def register_user(code: str, payload: RegisterPayload):  # legacy path; st
     pid = secrets.token_hex(8)
     player = Player(id=pid, name=payload.name, email=payload.email, participant_code=normalized_email)
     session.players[pid] = player
-    storage.save_session_dict(code, session.model_dump())
+    # Defer disk write to reduce I/O under load; registration will be persisted
+    # by the next lifecycle event (start/goto/next/reveal/reset) or periodic snapshot.
     return {"playerId": pid, "participantCode": player.participant_code}
 
 
@@ -466,6 +498,7 @@ async def start_quiz(code: str, payload: StartPayload | None = None, _: None = D
                 await sio.emit("lifeline_status", p.lifelines, to=sid)
             except Exception:
                 pass
+    # Persist on lifecycle to amortize disk writes.
     storage.save_session_dict(code, session.model_dump())
     await emit_current_question(code)
     await _emit_answers_progress(session)
@@ -492,6 +525,7 @@ async def goto_question(code: str, payload: GotoPayload, _: None = Depends(requi
     session.paused = False
     session.paused_at = None
     session.paused_accumulated = 0.0
+    # Persist on lifecycle to amortize disk writes.
     storage.save_session_dict(code, session.model_dump())
     # Hide overlays and broadcast the selected question
     await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
@@ -525,6 +559,7 @@ async def next_question(code: str, _: None = Depends(require_admin)):
     session.paused_at = None
     session.paused_accumulated = 0.0
     session.current_answer_times = {}
+    # Persist on lifecycle to amortize disk writes.
     storage.save_session_dict(code, session.model_dump())
     # Ensure leaderboard is hidden when moving to the next question
     await sio.emit("leaderboard_hide", {}, room=QUIZ_ROOM)
@@ -541,6 +576,7 @@ async def reveal_only(code: str, _: None = Depends(require_admin)):
     if not (0 <= session.current_index < len(session.questions)):
         return {"ok": False, "message": "No active question"}
     await _reveal_answers(session)
+    # Persist on lifecycle to amortize disk writes.
     storage.save_session_dict(code, session.model_dump())
     return {"ok": True, "revealed": True}
 
@@ -790,7 +826,7 @@ async def submit_answer(sid, data):
         return
     session.current_answers[pid] = str(answer)
     session.current_answer_times[pid] = time.time()
-    storage.save_session_dict(code, session.model_dump())
+    # Do NOT persist per-answer to avoid heavy I/O; answers will be saved on reveal/next.
     await sio.emit("answer_submitted", {"playerId": pid, "name": p.name if p else "?"}, room=ADMIN_ROOM)
     await sio.emit("answer_locked", {"locked": True, "answer": str(answer)}, to=sid)
     await _emit_answers_progress(session)
@@ -837,6 +873,7 @@ async def lifeline_request(sid, data):
         await sio.emit("lifeline_hint", {"hint": q.hint or ""}, to=sid)
     else:
         await sio.emit("lifeline_ack", {"lifeline": lifeline}, to=sid)
+    # Persist lifeline usage with lifecycle batching; optional immediate persist could be enabled if needed.
     storage.save_session_dict(code, session.model_dump())
 
 

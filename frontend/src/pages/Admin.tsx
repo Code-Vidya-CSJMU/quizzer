@@ -166,6 +166,34 @@ export default function Admin() {
     }
   }
 
+  async function disconnectAll() {
+    if (!token) return
+    if (!confirm('Disconnect all connected clients?')) return
+    const r = await fetch(api('/api/admin/disconnect_all'), { method: 'POST', headers: { 'X-Admin-Token': token } })
+    if (r.ok) {
+      const d = await r.json().catch(() => ({}))
+      appendLog(`Disconnected ${d.disconnected ?? '?'} clients`)
+      refreshParticipants()
+    } else {
+      appendLog('Disconnect all failed')
+      alert('Failed to disconnect clients')
+    }
+  }
+
+  async function clearSnapshots() {
+    if (!token) return
+    if (!confirm('Delete all leaderboard snapshots for the current quiz?')) return
+    const r = await fetch(api('/api/admin/leaderboard/snapshots/clear'), { method: 'POST', headers: { 'X-Admin-Token': token } })
+    if (r.ok) {
+      const d = await r.json().catch(() => ({}))
+      appendLog(`Deleted ${d.deleted ?? 0} leaderboard snapshots`)
+      listSnapshots()
+    } else {
+      appendLog('Clearing leaderboard snapshots failed')
+      alert('Failed to clear snapshots')
+    }
+  }
+
   useEffect(() => { if (token) { listQsets(); refreshParticipants(); loadAllowed(); listSnapshots(); loadCurrentQuestions() } }, [token])
 
   function addChoice() {
@@ -553,6 +581,15 @@ export default function Admin() {
           </div>
         </section>
       </div>
+
+      <section className="border border-slate-200 rounded-xl p-4 mt-4 mb-8 bg-white">
+        <h2 className="text-lg font-semibold">Maintenance</h2>
+        <div className="flex gap-2 flex-wrap mt-2">
+          <button onClick={disconnectAll} disabled={!token}>Disconnect Everyone</button>
+          <button onClick={clearSnapshots} disabled={!token}>Clear Leaderboard Snapshots</button>
+        </div>
+        <p className="text-xs text-slate-600 mt-1">These actions are immediate and cannot be undone.</p>
+      </section>
     </div>
   )
 }

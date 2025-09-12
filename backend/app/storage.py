@@ -182,3 +182,25 @@ def load_leaderboard_snapshot(file_name: str) -> Optional[Dict]:
         return None
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def delete_leaderboard_snapshots(code: Optional[str] = None) -> int:
+    """Delete leaderboard snapshots. If code is provided, only delete for that code.
+    Returns the number of files deleted.
+    """
+    ldir = _leaderboard_dir()
+    if not os.path.isdir(ldir):
+        return 0
+    deleted = 0
+    prefix = (str(code).upper() + "_") if code else None
+    for name in list(os.listdir(ldir)):
+        if not name.endswith('.json'):
+            continue
+        if prefix and not name.upper().startswith(prefix):
+            continue
+        try:
+            os.remove(os.path.join(ldir, name))
+            deleted += 1
+        except Exception:
+            continue
+    return deleted
