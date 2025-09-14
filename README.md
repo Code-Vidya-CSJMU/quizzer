@@ -2,6 +2,15 @@
 
 A simple web app I built for hosting live quiz competitions at my college coding club. It supports real-time scoring, player interaction, and has admin controls. Uses FastAPI for the backend and React for the frontend.
 
+## Deployment
+
+When I ran this for our coding club, I used:
+
+- **Frontend**: Deployed on [Vercel](https://vercel.com) - it was super easy to connect to GitHub and it automatically built and deployed the React app
+- **Backend**: Hosted on [AlwaysData](https://alwaysdata.com) - they offer a free tier with Python support that worked well for our needs
+
+This setup let me host everything for free, and the real-time features worked great across the internet. The Socket.IO connection between Vercel and AlwaysData had no issues during our events.
+
 ## Features
 
 ### Core Functionality
