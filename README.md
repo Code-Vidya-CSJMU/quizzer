@@ -45,16 +45,6 @@ A simple web app I built for hosting live quiz competitions at my college coding
 - [ ] **Stats Dashboard**: More detailed statistics on how people are doing
 - [ ] **Multiple Languages**: Support for non-English languages
 - [ ] **Better Display Screen**: Show how many people are connected, who's answered, etc.
-- [ ] **More Themes**: Add more customization options for the look and feel
-
-
-## Credits
-
-Built with FastAPI, Socket.IO, React, and Vite. UI styled with Tailwind CSS.
-
-Made this for my college coding club to make our quiz events more fun.
-
-MIT License.
 - [ ] **Advanced Theming Options**: More customization options for branding and UI appearance
 
 ## Setup
